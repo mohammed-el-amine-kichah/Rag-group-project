@@ -70,7 +70,10 @@ function RouteComponent() {
 
   const { data: user } = useSuspenseQuery(authQueryOptions);
 
-  const { data: previousConversations } = useQuery({
+  const {
+    data: previousConversations,
+    isPending: isLoadingPreviousConversations,
+  } = useQuery({
     queryKey: ["previous-conversations"],
     queryFn: () =>
       kyInstance.get("conversations").json<{
@@ -162,14 +165,21 @@ function RouteComponent() {
       },
     });
 
-  const {} = useMutation({
-    mutationFn: (id: string) => {
-      return kyInstance(`conversation/${id}`).json();
-    },
-    onSuccess: () => {
-      toast.success("Conversation");
-    },
-  });
+  const { mutate: deleteConversation, isPending: isDeletingConversation } =
+    useMutation({
+      mutationFn: (id: string) => {
+        return kyInstance.delete(`conversations/${id}`).json();
+      },
+      onSuccess: async (_, vars) => {
+        toast.success("Conversation deleted successfully");
+        if (vars === id) {
+          await navigate({ to: "/" });
+        }
+        await queryClient.refetchQueries({
+          queryKey: ["previous-conversations"],
+        });
+      },
+    });
 
   const { mutate: createNewConversation, isPending: isCreatingNewPage } =
     useMutation({
@@ -298,6 +308,7 @@ function RouteComponent() {
               <span>المحادثات السابقة</span>
             </h4>
             <div className="overflow-y-auto space-y-2 w-full">
+              {isLoadingPreviousConversations && <Loader2 />}
               {previousConversations?.conversations.map((conv) => (
                 <Link
                   className="hover:bg-emerald-800 rounded-lg p-3 transition-colors flex items-center justify-between w-full"
@@ -309,7 +320,15 @@ function RouteComponent() {
                   }}
                 >
                   <span>{conv.title}</span>
-                  <button className="hover:bg-gray-100/70 rounded-xl p-1 ">
+                  <button
+                    disabled={isDeletingConversation}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      deleteConversation(conv.id);
+                    }}
+                    className="hover:bg-gray-100/70 rounded-xl p-1 cursor-pointer"
+                  >
                     <Trash2 />
                   </button>
                 </Link>
