@@ -689,45 +689,45 @@ async def save_ai_answer(
         message="AI message inserted in db successfully"
     )
 
-    @app.delete('/api/conversations/{conversation_id}', response_model=Dict[str, str])
-    async def delete_conversation(
-        conversation_id: str,
-        request: Request,
-        user_id: str = Depends(login_required),
-        db: psycopg2.extensions.connection = Depends(get_db_connection)
-    ):
-        """Delete a conversation and its messages for the authenticated user"""
-        cursor = db.cursor()
+@app.delete('/api/conversations/{conversation_id}', response_model=Dict[str, str])
+async def delete_conversation(
+    conversation_id: str,
+    request: Request,
+    user_id: str = Depends(login_required),
+    db: psycopg2.extensions.connection = Depends(get_db_connection)
+):
+    """Delete a conversation and its messages for the authenticated user"""
+    cursor = db.cursor()
 
-        # Verify conversation belongs to user
-        cursor.execute(
-            "SELECT id FROM conversations WHERE id = %s AND user_id = %s",
-            (conversation_id, user_id)
+    # Verify conversation belongs to user
+    cursor.execute(
+        "SELECT id FROM conversations WHERE id = %s AND user_id = %s",
+        (conversation_id, user_id)
+    )
+    conversation = cursor.fetchone()
+
+    if not conversation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation not found"
         )
-        conversation = cursor.fetchone()
 
-        if not conversation:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Conversation not found"
-            )
-
-        try:
-            # Delete messages first (if ON DELETE CASCADE is not set)
-            cursor.execute(
-                "DELETE FROM messages WHERE conversation_id = %s",
-                (conversation_id,)
-            )
-            # Delete the conversation
-            cursor.execute(
-                "DELETE FROM conversations WHERE id = %s",
-                (conversation_id,)
-            )
-            db.commit()
-            return {"message": "Conversation deleted successfully"}
-        except Exception as e:
-            db.rollback()
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=str(e)
-            )
+    try:
+        # Delete messages first (if ON DELETE CASCADE is not set)
+        cursor.execute(
+            "DELETE FROM messages WHERE conversation_id = %s",
+            (conversation_id,)
+        )
+        # Delete the conversation
+        cursor.execute(
+            "DELETE FROM conversations WHERE id = %s",
+            (conversation_id,)
+        )
+        db.commit()
+        return {"message": "Conversation deleted successfully"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )

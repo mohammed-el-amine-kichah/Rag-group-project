@@ -41,6 +41,7 @@ EMBEDDING_MODEL_NAME=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
 GEMINI_API_KEY=your_gemini_api_key_here
 CHUNK_SIZE=500
 MEMORY_SIZE=10
+DATABASE_URL=postgresql://....
 ```
 
 ### 4. Run once to generate vector store
@@ -56,7 +57,7 @@ This creates the `vector_store/` folder based on `data/*.docx` or `data/*.txt` f
 ### 5. Start the backend API
 
 ```bash
-gunicorn backend.api:app --reload
+uvicorn backend.api:app --reload
 ```
 
 Your RAG API is now running at `http://localhost:8000`
