@@ -4,6 +4,7 @@ import React, { useState } from "react";
 import { Building2, Mail, Lock, User, Loader2 } from "lucide-react";
 import { kyInstance } from "@/constants";
 import { toast } from "sonner";
+import type { HTTPError } from "ky";
 
 export const Route = createFileRoute("/_auth/signup")({
   component: RouteComponent,
@@ -32,9 +33,10 @@ function RouteComponent() {
       await queryClient.invalidateQueries({ queryKey: ["auth-user"] });
       navigate({ to: "/" });
     },
-    onError: (error) => {
+    onError: async (error: HTTPError) => {
+      const errors: { detail: string } = await error.response.json();
       toast.error("فشل إنشاء الحساب");
-      setErrors((lastError) => ({ ...lastError, general: error.message }));
+      setErrors((lastError) => ({ ...lastError, general: errors.detail }));
     },
   });
 
@@ -173,7 +175,11 @@ function RouteComponent() {
             type="submit"
             className="w-full flex items-center justify-center bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg px-4 py-2 transition-colors"
           >
-            {!isPending ? "إنشاء حساب" : <Loader2 className="size-5 animate-spin shrink-0" />}
+            {!isPending ? (
+              "إنشاء حساب"
+            ) : (
+              <Loader2 className="size-5 animate-spin shrink-0" />
+            )}
           </button>
         </form>
 

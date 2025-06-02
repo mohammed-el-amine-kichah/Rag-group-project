@@ -23,6 +23,7 @@ import {
 import { API_BASE, authQueryOptions, kyInstance } from "@/constants";
 import { toast } from "sonner";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 type Chat = {
   id: string;
@@ -47,9 +48,11 @@ export const Route = createFileRoute("/_authenticated/chat/$id")({
   },
   component: RouteComponent,
   wrapInSuspense: true,
-  pendingComponent: () => <div className="min-h-screen flex items-center justify-center">
-    <Loader2 className="size-16 animate-spin text-white" />
-  </div>
+  pendingComponent: () => (
+    <div className="min-h-screen flex items-center justify-center">
+      <Loader2 className="size-16 animate-spin text-white" />
+    </div>
+  ),
 });
 
 function RouteComponent() {
@@ -125,92 +128,105 @@ function RouteComponent() {
   //   },
   // });
 
-  const {mutate : sendMessageStream , isPending : isSendingMessageStream} = useMutation({
-    mutationFn: async (message: string) => {
-      const response = await fetch(`${API_BASE}/api/stream-answer/${id}/messages`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-
-        },
-        body: JSON.stringify({ message }),
-        credentials : 'include'
-      });
-      
-      queryClient.refetchQueries({queryKey : ["previous-conversations"]});
-
-      const reader = response.body!.getReader();
-      const decoder = new TextDecoder();
-      let fullAnswer = "";
-      let done = false;
-
-      const newId = crypto.randomUUID() as string
-
-      queryClient.setQueryData<Chat>(['chat',id],(old) => {
-        if(!old) return old
-        const messages = [{id: newId, content : '' ,is_user : false},...old.messages]
-
-        return {...old , messages}
-
-      })
-    
-      while (!done) {
-        const { value, done: doneReading } = await reader.read();
-        done = doneReading;
-        const chunk = decoder.decode(value || new Uint8Array(), { stream: !done });
-        fullAnswer += chunk;
-        
-        queryClient.setQueryData<Chat>(['chat',id],(old) => {
-          if(!old) return old
-          return {...old , messages : old.messages.map(msg => (msg.id === newId ? {...msg , content : fullAnswer} : msg))}
-        })
-      }
-    
-      console.log("Final Answer:", fullAnswer);
-
-      await fetch(`${API_BASE}/api/stream-answer/${id}/ai-message`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-
-        },
-        body: JSON.stringify({ message : fullAnswer }),
-        credentials : 'include'
-      })
-
-      return true;
-    }
-  })
-
-  const {mutate: createNewConversation , isPending : isCreatingNewPage} = useMutation({
-    mutationFn: () => kyInstance
-    .post(`conversations`, { json: { title: "محادثة جديدة" } })
-    .json<{ id: string; title: string }>(),
-    onSuccess: (data) => {
-      queryClient.setQueryData<{
-        conversations: {
-          id: string;
-          title: string;
-        }[];
-      }>(["previous-conversations"], (old) => {
-        if (!old) return old;
-        const isAlreadyExists = old.conversations.find(
-          (conv) => conv.id === data.id
+  const { mutate: sendMessageStream, isPending: isSendingMessageStream } =
+    useMutation({
+      mutationFn: async (message: string) => {
+        const response = await fetch(
+          `${API_BASE}/api/stream-answer/${id}/messages`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ message }),
+            credentials: "include",
+          }
         );
-        if (isAlreadyExists) {
-          toast.info("أنت بالفعل في محادثة جديدة");
-          return old
-        };
-        return { conversations: [data, ...old.conversations] };
-      });
-      navigate({
-        to: "/chat/$id",
-        params: {
-          id: data.id,
-        },
-      });
-    }
-  })
+
+        queryClient.refetchQueries({ queryKey: ["previous-conversations"] });
+
+        const reader = response.body!.getReader();
+        const decoder = new TextDecoder();
+        let fullAnswer = "";
+        let done = false;
+
+        const newId = crypto.randomUUID() as string;
+
+        queryClient.setQueryData<Chat>(["chat", id], (old) => {
+          if (!old) return old;
+          const messages = [
+            { id: newId, content: "", is_user: false },
+            ...old.messages,
+          ];
+
+          return { ...old, messages };
+        });
+
+        while (!done) {
+          const { value, done: doneReading } = await reader.read();
+          done = doneReading;
+          const chunk = decoder.decode(value || new Uint8Array(), {
+            stream: !done,
+          });
+          fullAnswer += chunk;
+
+          queryClient.setQueryData<Chat>(["chat", id], (old) => {
+            if (!old) return old;
+            return {
+              ...old,
+              messages: old.messages.map((msg) =>
+                msg.id === newId ? { ...msg, content: fullAnswer } : msg
+              ),
+            };
+          });
+        }
+
+        console.log("Final Answer:", fullAnswer);
+
+        await fetch(`${API_BASE}/api/stream-answer/${id}/ai-message`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ message: fullAnswer }),
+          credentials: "include",
+        });
+
+        return true;
+      },
+    });
+
+  const { mutate: createNewConversation, isPending: isCreatingNewPage } =
+    useMutation({
+      mutationFn: () =>
+        kyInstance
+          .post(`conversations`, { json: { title: "محادثة جديدة" } })
+          .json<{ id: string; title: string }>(),
+      onSuccess: (data) => {
+        queryClient.setQueryData<{
+          conversations: {
+            id: string;
+            title: string;
+          }[];
+        }>(["previous-conversations"], (old) => {
+          if (!old) return old;
+          const isAlreadyExists = old.conversations.find(
+            (conv) => conv.id === data.id
+          );
+          if (isAlreadyExists) {
+            toast.info("أنت بالفعل في محادثة جديدة");
+            return old;
+          }
+          return { conversations: [data, ...old.conversations] };
+        });
+        navigate({
+          to: "/chat/$id",
+          params: {
+            id: data.id,
+          },
+        });
+      },
+    });
   useEffect(() => {
     if (lastEleRef.current) {
       lastEleRef.current.scrollIntoView({
@@ -249,7 +265,7 @@ function RouteComponent() {
 
     // mutate(message);
 
-    sendMessageStream(message)
+    sendMessageStream(message);
 
     setMessage("");
   };
@@ -284,16 +300,23 @@ function RouteComponent() {
             </button>
           </div>
 
-          
-            <div className="w-full" >
- <button disabled={isCreatingNewPage} className={`flex w-full cursor-pointer items-center px-2 gap-x-4 hover:bg-emerald-800 py-2 rounded-lg ${isCreatingNewPage ?  "bg-emeraled-800" : ""}`} onClick={() => {
-  createNewConversation()
- }} >
-              <MessageCirclePlus />  
-              {isCreatingNewPage ? <Loader2 className="size-5 text-white animate-spin" /> : <h3 className="text-lg font-semibold">محادثة جديدة</h3>  }
- </button>
-              </div>  
-          
+          <div className="w-full">
+            <button
+              disabled={isCreatingNewPage}
+              className={`flex w-full cursor-pointer items-center px-2 gap-x-4 hover:bg-emerald-800 py-2 rounded-lg ${isCreatingNewPage ? "bg-emeraled-800" : ""}`}
+              onClick={() => {
+                createNewConversation();
+              }}
+            >
+              <MessageCirclePlus />
+              {isCreatingNewPage ? (
+                <Loader2 className="size-5 text-white animate-spin" />
+              ) : (
+                <h3 className="text-lg font-semibold">محادثة جديدة</h3>
+              )}
+            </button>
+          </div>
+
           <div className="gap-y-4 h-full w-full grid grid-flow-row grid-rows-[auto_1fr_auto_auto]">
             <h4 className="w-full flex items-center gap-3 p-3">
               <History className="h-5 w-5" />
@@ -369,16 +392,17 @@ function RouteComponent() {
         {/* Main Content */}
         <main className="container mx-auto p-4 flex flex-col h-[calc(100vh-88px)]">
           <div className="flex-1 bg-white/10 rounded-lg p-2 sm:p-4 mb-4 overflow-y-auto">
-            <div className="flex flex-col-reverse gap-y-4">
+            <div className="flex  flex-col-reverse gap-y-4">
               <div ref={lastEleRef} />
               {/* {isSendingMessage && (
                 <div className="flex justify-end" >
                   <div className="animate-pulse shrink-0 h-5 w-5 rounded-full bg-white" />
                 </div>)} */}
-                {isSendingMessageStream && (
-                <div className="flex justify-end" >
+              {isSendingMessageStream && (
+                <div className="flex justify-end">
                   <div className="animate-pulse shrink-0 h-5 w-5 rounded-full bg-white" />
-                </div>)}
+                </div>
+              )}
               {chat.map((msg, index) => (
                 <div
                   key={index}
@@ -397,9 +421,9 @@ function RouteComponent() {
                       {!msg.is_user && (
                         <MessageCircle className="shrink-0 h-5 w-5 mt-1" />
                       )}
-                      <div className="prose [&>*]:text-white">
-                        <ReactMarkdown  >
-                        {msg.content}
+                      <div className="prose prose-invert prose-lg">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {msg.content}
                         </ReactMarkdown>
                       </div>
                     </div>

@@ -1,13 +1,15 @@
-from flask import Flask, request, jsonify, session, Response,stream_with_context , g
-from flask_cors import CORS
-from flask_session import Session
-from functools import wraps
+from fastapi import FastAPI, Request, HTTPException, Depends, status
+from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.sessions import SessionMiddleware
+from pydantic import BaseModel
 import os
 import uuid
-import datetime
-import sqlite3 # Import sqlite3
-from werkzeug.utils import secure_filename
-from werkzeug.security import generate_password_hash, check_password_hash
+from pathlib import Path
+from typing import Optional, Dict, Any, Generator
+from werkzeug.security import generate_password_hash, check_password_hash  
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from rag.main import build_or_update_store
 from rag.vector_store import VectorStore
 from rag.retriever import retrieve_relevant_chunks
@@ -44,247 +46,251 @@ SKIP
     return None if out == "SKIP" else out
 
 
-# Initialize Flask
-app = Flask(__name__)
 
-# Configuration
-app.config['SECRET_KEY'] = "bbe40792-2cb6-4d7a-b466-2f2c5ce16a34"  # Change in production
-app.config['SESSION_TYPE'] = 'filesystem'  # Using filesystem-based sessions
-app.config['SESSION_PERMANENT'] = True
-app.config['PERMANENT_SESSION_LIFETIME'] = datetime.timedelta(days=7)  # Session expires after 7 days
-app.config['UPLOAD_FOLDER'] = 'data'
+app = FastAPI()
 
-# Setup CORS for React frontend
-CORS(app, supports_credentials=True, origins=[
-    "http://localhost:5173",  # Development React server
-    "http://localhost:5000",  # Production server if served from Flask
-    # Add your production domain here
-])
+# Add session middleware (equivalent to Flask-Session)
+app.add_middleware(SessionMiddleware, secret_key="your-secret-key-here")
 
-# Initialize session
-Session(app)
-
-# Ensure upload directory exists
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-
-# SQLite Database Configuration
-DATABASE_PATH = 'database.db' # Define your SQLite database file
-
-def initialize_database(db):
-    """Initializes the database tables if they do not already exist."""
-    cursor = db.cursor()
-    # Create users table
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        id TEXT PRIMARY KEY NOT NULL,
-        name TEXT NOT NULL,
-        email TEXT UNIQUE NOT NULL,
-        password TEXT NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-    """)
-
-    # Create conversations table - Added is_new column
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS conversations (
-        id TEXT PRIMARY KEY NOT NULL,
-        user_id TEXT NOT NULL,
-        title TEXT NOT NULL,
-        is_title_changed BOOLEAN DEFAULT FALSE,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        is_new BOOLEAN DEFAULT TRUE, -- Added is_new column with default TRUE
-        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
-    )
-    """)
-
-    # Create messages table
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS messages (
-        id TEXT PRIMARY KEY NOT NULL,
-        conversation_id TEXT NOT NULL,
-        is_user BOOLEAN NOT NULL,
-        content TEXT NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (conversation_id) REFERENCES conversations (id) ON DELETE CASCADE
-    )
-    """)
-    db.commit() # Commit changes after creating tables
+# Add CORS middleware (equivalent to Flask-CORS)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],  # Configure as needed
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
-# --- SQLite Database Helper Functions ---
-def get_db():
-    """Establishes a database connection if not already present for the current request."""
-    # Check if the database connection is already in the request context
-    if 'db' not in g:
-        # Check if the database file exists. If not, initialize it.
-        # This ensures initialization happens on the first DB access,
-        # regardless of how the app is started (dev server, gunicorn, etc.).
-        db_exists = os.path.exists(DATABASE_PATH)
+DATABASE_URL = os.getenv("DATABASE_URL") 
 
-        g.db = sqlite3.connect(
-            DATABASE_PATH,
-            detect_types=sqlite3.PARSE_DECLTYPES
+def get_db_connection() -> Generator[psycopg2.extensions.connection, None, None]:
+    try:
+        db = psycopg2.connect(
+            DATABASE_URL,
+            cursor_factory=RealDictCursor  
         )
-        g.db.row_factory = sqlite3.Row # Allows accessing columns by name
+        yield db
+    except psycopg2.Error as e:
+        print(f"Database connection error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database connection failed"
+        )
+    finally:
+        if 'db' in locals():
+            db.close()
 
-        # If the database file did not exist, initialize the tables
-        if not db_exists:
-            print("Database file not found. Initializing database tables.")
-            initialize_database(g.db) # Pass the connection
 
-    return g.db
+# Pydantic models for request validation
+class SignupRequest(BaseModel):
+    name: str
+    email: str
+    password: str
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class UserResponse(BaseModel):
+    id: str
+    name: str
+    email: str
 
 
-@app.teardown_appcontext
-def close_db(e=None):
-    """Closes the database connection at the end of the request."""
-    db = g.pop('db', None)
-    if db is not None:
-        db.close()
-# --- End SQLite Database Helper Functions ---
+@app.middleware("http")
+async def close_db_connection(request: Request, call_next):
+    """Middleware to ensure database connections are closed after each request"""
+    response = await call_next(request)
+    
+    # Close database connection if it exists
+    if hasattr(request.state, 'db'):
+        request.state.db.close()
+    
+    return response
 
-# Load (or create) the vector store at startup
+# Authentication dependency (replaces @login_required decorator)
+async def login_required(request: Request):
+    """
+    Dependency to check if user is authenticated.
+    Raises HTTPException if not authenticated.
+    """
+    if 'user_id' not in request.session:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required"
+        )
+    return request.session['user_id']
 
-# Authentication decorator
-def login_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if 'user_id' not in session:
-            return jsonify({"error": "Authentication required"}), 401
-        return f(*args, **kwargs)
-    return decorated_function
+# Optional: Dependency to get current user info
+async def get_current_user(request: Request, user_id: str = Depends(login_required),db: psycopg2.extensions.connection = Depends(get_db_connection)):
+
+    cursor = db.cursor()
+    
+    cursor.execute(
+        "SELECT id, name, email FROM users WHERE id = %s", (user_id,)
+    )
+    user = cursor.fetchone()
+    
+    if not user:
+        # Clear invalid session
+        request.session.pop('user_id', None)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid session"
+        )
+    
+    return user
 
 # Routes for authentication
-@app.route('/api/signup', methods=['POST'])
-def signup():
-    data = request.get_json()
-    name = data.get('name')
-    email = data.get('email')
-    password = data.get('password')
+@app.post('/api/signup', response_model=Dict[str, Any], status_code=201)
+async def signup(request: Request, signup_data: SignupRequest,db: psycopg2.extensions.connection = Depends(get_db_connection)):
+    """User registration endpoint"""
     
-    if not name or not email or not password:
-        return jsonify({"error": "Name, email and password are required"}), 400
-    
-    db = get_db()
+    # Input validation is handled by Pydantic automatically
+    # But you can add additional validation if needed
+    if not signup_data.name.strip() or not signup_data.email.strip() or not signup_data.password.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Name, email and password are required"
+        )
+
     cursor = db.cursor()
     
     # Check if user already exists
     cursor.execute(
-        "SELECT id FROM users WHERE email = ?", (email,)
+        "SELECT id FROM users WHERE email = %s", (signup_data.email,)
     )
     existing_user = cursor.fetchone()
     
     if existing_user:
-        return jsonify({"error": "User with this email already exists"}), 400
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User with this email already exists"
+        )
     
     # Create new user
     user_id = str(uuid.uuid4())
-    hashed_password = generate_password_hash(password)
+    hashed_password = generate_password_hash(signup_data.password)
     
     try:
         cursor.execute(
-            "INSERT INTO users (id, name, email, password) VALUES (?, ?, ?, ?)",
-            (user_id, name, email, hashed_password)
+            "INSERT INTO users (id, name, email, password) VALUES (%s, %s, %s, %s)",
+            (user_id, signup_data.name, signup_data.email, hashed_password)
         )
-        db.commit() # Commit the new user
+        db.commit()
         
         # Create session
-        session['user_id'] = user_id
+        request.session['user_id'] = user_id
         
-        return jsonify({
+        return {
             "message": "User registered successfully",
             "user": {
                 "id": user_id,
-                "name": name,
-                "email": email
+                "name": signup_data.name,
+                "email": signup_data.email
             }
-        }), 201
+        }
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
 
-@app.route('/api/login', methods=['POST'])
-def login():
-    data = request.get_json()
-    email = data.get('email')
-    password = data.get('password')
-    
-    if not email or not password:
-        return jsonify({"error": "Email and password are required"}), 400
-    
-    db = get_db()
+@app.post('/api/login', response_model=Dict[str, Any])
+async def login(request: Request, login_data: LoginRequest,db: psycopg2.extensions.connection = Depends(get_db_connection)):
+
+
     cursor = db.cursor()
 
     # Find user
     cursor.execute(
-        "SELECT id, name, email, password FROM users WHERE email = ?", (email,)
+        "SELECT id, name, email, password FROM users WHERE email = %s", (login_data.email,)
     )
-    user = cursor.fetchone() # Use fetchone() for single row
+    user = cursor.fetchone()
 
     if not user:
-        return jsonify({"error": "Invalid email or password"}), 401
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password"
+        )
     
-    # Check password (user[3] is the 'password' column)
-    if not check_password_hash(user['password'], password):
-        return jsonify({"error": "Invalid email or password"}), 401
+    # Check password
+    if not check_password_hash(user['password'], login_data.password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password"
+        )
     
-    # Create session (user[0] is 'id', user[1] is 'name', user[2] is 'email')
-    
-    session['user_id'] = user['id']
+    # Create session
+    request.session['user_id'] = user['id']
 
-
-    return jsonify({
+    return {
         "message": "Login successful",
         "user": {
             "id": user['id'],
             "name": user['name'],
             "email": user['email']
         }
-    }), 200
+    }
 
-@app.route('/api/logout', methods=['POST'])
-def logout():
-    session.pop('user_id', None)
-    return jsonify({"message": "Logout successful"}), 200
+@app.post('/api/logout', response_model=Dict[str, str])
+async def logout(request: Request):
+    """User logout endpoint"""
+    request.session.pop('user_id', None)
+    return {"message": "Logout successful"}
 
-@app.route('/api/session', methods=['GET'])
-def get_session():
+@app.get('/api/session', response_model=Dict[str, Any])
+async def get_session(request: Request, db: psycopg2.extensions.connection = Depends(get_db_connection)):
 
-    print(session)
+    if 'user_id' not in request.session:
+        return {"authenticated": False}
 
-    if 'user_id' not in session:
-        return jsonify({"authenticated": False}), 200
-    
-    
-    db = get_db()
     cursor = db.cursor()
 
-
     cursor.execute(
-        "SELECT id, name, email FROM users WHERE id = ?", (session['user_id'],)
+        "SELECT id, name, email FROM users WHERE id = %s", (request.session['user_id'],)
     )
     user = cursor.fetchone()
     
     if not user:
-        session.pop('user_id', None)
-        return jsonify({"authenticated": False}), 200
+        request.session.pop('user_id', None)
+        return {"authenticated": False}
     
-    return jsonify({
+    return {
         "authenticated": True,
         "user": {
             "id": user['id'],
             "name": user['name'],
             "email": user['email']
         }
-    }), 200
+    }
+
+
+
+class ConversationResponse(BaseModel):
+    id: str
+    title: str
+
+class ConversationsListResponse(BaseModel):
+    conversations: list[ConversationResponse]
+
+class CreateConversationRequest(BaseModel):
+    title: Optional[str] = "New Conversation"
+
+class CreateConversationResponse(BaseModel):
+    id: str
+    title: str
 
 # Conversations & Messages routes
-@app.route('/api/conversations', methods=['GET'])
-@login_required
-def get_conversations():
-    user_id = session['user_id']
-
-    db = get_db()
+@app.get('/api/conversations', response_model=ConversationsListResponse)
+async def get_conversations(
+    request: Request,
+    user_id: str = Depends(login_required),
+    db: psycopg2.extensions.connection = Depends(get_db_connection)
+):
+    """Get all conversations for the authenticated user"""
+    
     cursor = db.cursor()
 
     # Include is_new in the select statement
@@ -292,11 +298,10 @@ def get_conversations():
         """
         SELECT id, title, created_at, updated_at, is_new
         FROM conversations
-        WHERE user_id = ?
+        WHERE user_id = %s
         ORDER BY updated_at DESC
         """,
         (user_id,)
-        
     )
     conversations = cursor.fetchall()
 
@@ -307,22 +312,25 @@ def get_conversations():
             "title": conv['title'],
         })
 
-    return jsonify({"conversations": result}), 200
+    return {"conversations": result}
 
-@app.route('/api/conversations', methods=['POST'])
-@login_required
-def create_conversation():
+@app.post('/api/conversations', response_model=CreateConversationResponse)
+async def create_conversation(
+    request: Request,
+    conversation_data: CreateConversationRequest,
+    user_id: str = Depends(login_required),
+    db: psycopg2.extensions.connection = Depends(get_db_connection)
+):
+    """Create a new conversation or return existing 'new' conversation"""
+    
     # The title might be provided, but we prioritize finding an existing new conversation
-    data = request.get_json()
-    requested_title = data.get('title', 'New Conversation')
-
-    user_id = session['user_id']
-    db = get_db()
+    requested_title = conversation_data.title
+    
     cursor = db.cursor()
 
     # Check if an existing 'new' conversation exists for this user
     cursor.execute(
-        "SELECT id, title FROM conversations WHERE user_id = ? AND is_new = TRUE LIMIT 1",
+        "SELECT id, title FROM conversations WHERE user_id = %s AND is_new = TRUE LIMIT 1",
         (user_id,)
     )
     existing_new_conversation = cursor.fetchone()
@@ -330,56 +338,177 @@ def create_conversation():
     print(existing_new_conversation)
 
     if existing_new_conversation:
-        # If a 'new' conversation exists, return it
-        return jsonify({
-                "id": existing_new_conversation['id'],
-                "title": existing_new_conversation['title']
-        }), 200 # Use 200 OK as we are not creating a new resource
+        # If a 'new' conversation exists, return it with 200 OK status
+        return CreateConversationResponse(
+            id=existing_new_conversation['id'],
+            title=existing_new_conversation['title']
+        )
 
     # If no 'new' conversation exists, create a new one
     conversation_id = str(uuid.uuid4())
-    title_to_use = requested_title # Use the requested title or default
+    title_to_use = requested_title  # Use the requested title or default
 
     try:
         cursor.execute(
-            "INSERT INTO conversations (id, user_id, title, is_new) VALUES (?, ?, ?, TRUE)",
+            "INSERT INTO conversations (id, user_id, title, is_new) VALUES (%s, %s, %s, TRUE)",
             (conversation_id, user_id, title_to_use)
         )
-        db.commit() # Commit the new conversation
+        db.commit()  # Commit the new conversation
 
-        return jsonify({
-            "id": conversation_id,
-            "title": title_to_use
-        }), 201 # Use 201 Created as a new resource was made
+        # Return with 201 Created status (FastAPI automatically uses 201 for POST)
+        return CreateConversationResponse(
+            id=conversation_id,
+            title=title_to_use
+        )
     except Exception as e:
-        db.rollback() # Rollback changes if something goes wrong
-        return jsonify({"error": str(e)}), 500
+        db.rollback()  # Rollback changes if something goes wrong
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
 
+class ConversationResponse(BaseModel):
+    id: str
+    title: str
 
-@app.route('/api/conversations/<conversation_id>', methods=['GET'])
-@login_required
-def get_conversation(conversation_id):
-    user_id = session['user_id']
+class ConversationsListResponse(BaseModel):
+    conversations: list[ConversationResponse]
+
+class CreateConversationRequest(BaseModel):
+    title: Optional[str] = "New Conversation"
+
+class CreateConversationResponse(BaseModel):
+    id: str
+    title: str
+
+# Conversations & Messages routes
+@app.get('/api/conversations', response_model=ConversationsListResponse)
+async def get_conversations(
+    request: Request,
+    user_id: str = Depends(login_required),
+    db: psycopg2.extensions.connection = Depends(get_db_connection)
+):
+    """Get all conversations for the authenticated user"""
     
-    db = get_db()
+    cursor = db.cursor()
+
+    # Include is_new in the select statement
+    cursor.execute(
+        """
+        SELECT id, title, created_at, updated_at, is_new
+        FROM conversations
+        WHERE user_id = %s
+        ORDER BY updated_at DESC
+        """,
+        (user_id,)
+    )
+    conversations = cursor.fetchall()
+
+    result = []
+    for conv in conversations:
+        result.append({
+            "id": conv['id'],
+            "title": conv['title'],
+        })
+
+    return {"conversations": result}
+
+@app.post('/api/conversations', response_model=CreateConversationResponse)
+async def create_conversation(
+    request: Request,
+    conversation_data: CreateConversationRequest,
+    user_id: str = Depends(login_required),
+    db: psycopg2.extensions.connection = Depends(get_db_connection)
+):
+    """Create a new conversation or return existing 'new' conversation"""
+    
+    # The title might be provided, but we prioritize finding an existing new conversation
+    requested_title = conversation_data.title
+    
+    cursor = db.cursor()
+
+    # Check if an existing 'new' conversation exists for this user
+    cursor.execute(
+        "SELECT id, title FROM conversations WHERE user_id = %s AND is_new = TRUE LIMIT 1",
+        (user_id,)
+    )
+    existing_new_conversation = cursor.fetchone()
+
+    print(existing_new_conversation)
+
+    if existing_new_conversation:
+        # If a 'new' conversation exists, return it with 200 OK status
+        return CreateConversationResponse(
+            id=existing_new_conversation['id'],
+            title=existing_new_conversation['title']
+        )
+
+    # If no 'new' conversation exists, create a new one
+    conversation_id = str(uuid.uuid4())
+    title_to_use = requested_title  # Use the requested title or default
+
+    try:
+        cursor.execute(
+            "INSERT INTO conversations (id, user_id, title, is_new) VALUES (%s, %s, %s, TRUE)",
+            (conversation_id, user_id, title_to_use)
+        )
+        db.commit()  # Commit the new conversation
+
+        # Return with 201 Created status (FastAPI automatically uses 201 for POST)
+        return CreateConversationResponse(
+            id=conversation_id,
+            title=title_to_use
+        )
+    except Exception as e:
+        db.rollback()  # Rollback changes if something goes wrong
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+# Additional Pydantic models for messages
+class MessageResponse(BaseModel):
+    id: str
+    is_user: bool
+    content: str
+    created_at: str  # or datetime if you prefer
+
+class ConversationDetailResponse(BaseModel):
+    id: str
+    title: str
+    messages: list[MessageResponse]
+
+# Get specific conversation with messages
+@app.get('/api/conversations/{conversation_id}', response_model=ConversationDetailResponse)
+async def get_conversation(
+    conversation_id: str,
+    request: Request,
+    user_id: str = Depends(login_required),
+    db: psycopg2.extensions.connection = Depends(get_db_connection)
+):
+    """Get a specific conversation with all its messages"""
+    
     cursor = db.cursor()
 
     # Verify conversation belongs to user
     cursor.execute(
-        "SELECT id, title FROM conversations WHERE id = ? AND user_id = ?",
+        "SELECT id, title FROM conversations WHERE id = %s AND user_id = %s",
         (conversation_id, user_id)
     )
     conversation = cursor.fetchone()
     
     if not conversation:
-        return jsonify({"error": "Conversation not found"}), 404
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation not found"
+        )
     
     # Get messages
     cursor.execute(
         """
         SELECT id, is_user, content, created_at
         FROM messages
-        WHERE conversation_id = ?
+        WHERE conversation_id = %s
         ORDER BY created_at DESC
         """,
         (conversation_id,)
@@ -390,169 +519,100 @@ def get_conversation(conversation_id):
     for msg in messages:
         messages_list.append({
             "id": msg['id'],
-            "is_user": bool(msg['is_user'] ),
+            "is_user": bool(msg['is_user']),
             "content": msg['content'],
-            "created_at": msg['created_at']
+            "created_at": str(msg['created_at'])  # Convert to string for JSON serialization
         })
     
-    return jsonify({
-            "id": conversation['id'],
-            "title": conversation['title'],
-            "messages": messages_list
-    }), 200
+    return ConversationDetailResponse(
+        id=conversation['id'],
+        title=conversation['title'],
+        messages=messages_list
+    )
 
-# @app.route('/api/conversations/<conversation_id>/messages', methods=['POST'])
-# @login_required
-# def send_message(conversation_id):
-#     user_id = session['user_id']
-#     data = request.get_json()
-#     message = data.get('message')
-    
-#     if not message:
-#         return jsonify({"error": "Message content is required"}), 400
-    
-#     db = get_db()
-#     cursor = db.cursor()
 
-#     # Verify conversation belongs to user
-#     cursor.execute(
-#         "SELECT id , is_new , is_title_changed FROM conversations WHERE id = ? AND user_id = ?",
-#         (conversation_id, user_id)
-#     )
-#     conversation = cursor.fetchone()
-    
-#     if not conversation:
-#         return jsonify({"error": "Conversation not found"}), 404
+class MessageRequest(BaseModel):
+    message: str
 
-#     if bool(conversation['is_new']) == True:
-#         # If the conversation is new, set is_new to False
-#         cursor.execute(
-#             "UPDATE conversations SET is_new = FALSE WHERE id = ?",
-#             (conversation_id,)
-#         )
-#         db.commit() # Commit the update
+class SaveMessageResponse(BaseModel):
+    success: bool
+    message: str
 
-    
+# Import your RAG components (adjust import path as needed)
+# from rag.agent import model, build_prompt
 
-#     message_id = str(uuid.uuid4())
+@app.post('/api/stream-answer/{conversation_id}/messages')
+async def stream_answer(
+    conversation_id: str,
+    message_data: MessageRequest,
+    request: Request,
+    user_id: str = Depends(login_required),
+    db: psycopg2.extensions.connection = Depends(get_db_connection)
+):
+    """Stream AI response for a conversation message"""
+    
+    from rag.agent import model, build_prompt  # Import your RAG components
+    
+    message = message_data.message
+    
+    if not message.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Message content is required"
+        )
 
-#     if bool(conversation['is_title_changed']) == False:
-        
-#         new_title = classify_and_generate_title(message)
-        
-#         if new_title:
-
-#         # If the title has not been changed, update it to the first message
-#             cursor.execute(
-#                 "UPDATE conversations SET title = ?, is_title_changed = TRUE WHERE id = ?",
-#                 (new_title, conversation_id)
-#             )
-#             db.commit()
-    
-#     # Add user message to database
-#     cursor.execute(
-#         "INSERT INTO messages (id, conversation_id, is_user, content) VALUES (?, ?, ?, ?)",
-#         (message_id, conversation_id, True, message)
-#     )
-    
-#     db.commit() # Commit user message and conversation update
-    
-#     # Get conversation history for context
-#     cursor.execute(
-#         """
-#         SELECT is_user, content FROM messages
-#         WHERE conversation_id = ?
-#         ORDER BY created_at ASC
-#         LIMIT ?
-#         """,
-#         (conversation_id, MEMORY_SIZE * 2)  # Get enough for context
-#     )
-#     history = cursor.fetchall()
-    
-#     conversation_history = []
-#     for i in range(0, len(history), 2):
-#         if i + 1 < len(history):
-#             # Create pairs of (user_message, assistant_response)
-#             if history[i]['is_user'] and not history[i+1]['is_user']:  # If user then assistant
-#                 conversation_history.append((history[i]['content'], history[i+1]['content']))
-    
-#     # Use RAG to generate response
-#     print(conversation_history)
-#     chunks = retrieve_relevant_chunks(store, message, top_k=5)
-#     answer = generate_answer(chunks, message, conversation_history)
-    
-#     # Add assistant response to database
-#     assistant_message_id = str(uuid.uuid4())
-#     cursor.execute(
-#         "INSERT INTO messages (id, conversation_id, is_user, content) VALUES (?, ?, ?, ?)",
-#         (assistant_message_id, conversation_id, False, answer)
-#     )
-#     db.commit() # Commit assistant message
-    
-#     return jsonify({
-#             "id": assistant_message_id,
-#             "is_user": False,
-#             "content": answer
-#     }), 200
-
-@app.route('/api/stream-answer/<conversation_id>/messages', methods=['POST'])
-@login_required
-def stream_answer(conversation_id):
-    from rag.agent import model, build_prompt  # we'll add build_prompt below
-
-    user_id = session['user_id']
-    data = request.get_json()
-    message = data.get('message')
-
-    if not message:
-        return jsonify({"error": "Message content is required"}), 400
-
-    db = get_db()
     cursor = db.cursor()
 
     # Validate conversation ownership
-    cursor.execute("SELECT id , is_new, is_title_changed FROM conversations WHERE id = ? AND user_id = ?", (conversation_id, user_id))
+    cursor.execute(
+        "SELECT id, is_new, is_title_changed FROM conversations WHERE id = %s AND user_id = %s", 
+        (conversation_id, user_id)
+    )
     conversation = cursor.fetchone()
+    
     if not conversation:
-        return jsonify({"error": "Conversation not found"}), 404
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation not found"
+        )
 
+    # Handle new conversation logic
     if bool(conversation['is_new']) == True:
         # If the conversation is new, set is_new to False
         cursor.execute(
-            "UPDATE conversations SET is_new = FALSE WHERE id = ?",
+            "UPDATE conversations SET is_new = FALSE WHERE id = %s",
             (conversation_id,)
         )
-        db.commit() # Commit the update
+        db.commit()  # Commit the update
 
+    # Handle title generation logic
     if bool(conversation['is_title_changed']) == False:
-        
-        new_title = classify_and_generate_title(message)
+        new_title = classify_and_generate_title(message)  # You'll need to implement this
         
         if new_title:
-
-        # If the title has not been changed, update it to the first message
+            # If the title has not been changed, update it to the first message
             cursor.execute(
-                "UPDATE conversations SET title = ?, is_title_changed = TRUE WHERE id = ?",
+                "UPDATE conversations SET title = %s, is_title_changed = TRUE WHERE id = %s",
                 (new_title, conversation_id)
             )
             db.commit()
 
-    message_id = str(uuid.uuid4())
     # Add user message to database
+    message_id = str(uuid.uuid4())
     cursor.execute(
-        "INSERT INTO messages (id, conversation_id, is_user, content) VALUES (?, ?, ?, ?)",
+        "INSERT INTO messages (id, conversation_id, is_user, content) VALUES (%s, %s, %s, %s)",
         (message_id, conversation_id, True, message)
     )
-    
-    db.commit() # Commit user message
+    db.commit()  # Commit user message
 
-    # Build history
+    # Build conversation history
     cursor.execute("""
         SELECT is_user, content FROM messages
-        WHERE conversation_id = ?
+        WHERE conversation_id = %s
         ORDER BY created_at ASC
-        LIMIT ?
-    """, (conversation_id, MEMORY_SIZE * 2))
+        LIMIT %s
+    """, (conversation_id, MEMORY_SIZE * 2))  # You'll need to define MEMORY_SIZE
+    
     history = cursor.fetchall()
     conversation_history = [
         (history[i]['content'], history[i + 1]['content'])
@@ -560,97 +620,114 @@ def stream_answer(conversation_id):
         if history[i]['is_user'] and not history[i + 1]['is_user']
     ]
 
-    chunks = retrieve_relevant_chunks(store, message, top_k=5)
+    # Retrieve relevant chunks and build prompt
+    chunks = retrieve_relevant_chunks(store, message, top_k=5)  # You'll need to implement this
     prompt = build_prompt(chunks, message, conversation_history)
 
-    def generate():
-        for chunk in model.generate_content(prompt, stream=True):
-            if chunk.text:
-                yield chunk.text
+    def generate() -> Generator[str, None, None]:
+        """Generator function for streaming response"""
+        try:
+            for chunk in model.generate_content(prompt, stream=True):
+                if chunk.text:
+                    yield chunk.text
+        except Exception as e:
+            yield f"Error: {str(e)}"
 
-    return Response(stream_with_context(generate()), mimetype='text/plain')
+    # Return streaming response
+    return StreamingResponse(
+        generate(),
+        media_type='text/plain',
+        headers={
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+        }
+    )
 
+@app.post('/api/stream-answer/{conversation_id}/ai-message', response_model=SaveMessageResponse)
+async def save_ai_answer(
+    conversation_id: str,
+    message_data: MessageRequest,
+    request: Request,
+    user_id: str = Depends(login_required),
+    db: psycopg2.extensions.connection = Depends(get_db_connection)
+):
+    """Save AI response message to database"""
+    
+    message = message_data.message
+    
+    if not message.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Message content is required"
+        )
 
-@app.route('/api/stream-answer/<conversation_id>/ai-message', methods=['POST'])
-@login_required
-def save_ai_answer(conversation_id):
-    user_id = session['user_id']
-    data = request.get_json()
-    message = data.get('message')
-
-    if not message:
-        return jsonify({"error": "Message content is required"}), 400
-
-    db = get_db()
     cursor = db.cursor()
 
     # Validate conversation ownership
-    cursor.execute("SELECT id FROM conversations WHERE id = ? AND user_id = ?", (conversation_id, user_id))
-    conversation = cursor.fetchone()
-    if not conversation:
-        return jsonify({"error": "Conversation not found"}), 404
-
-
-    message_id = str(uuid.uuid4())
-    # Add user message to database
     cursor.execute(
-        "INSERT INTO messages (id, conversation_id, is_user, content) VALUES (?, ?, ?, ?)",
+        "SELECT id FROM conversations WHERE id = %s AND user_id = %s", 
+        (conversation_id, user_id)
+    )
+    conversation = cursor.fetchone()
+    
+    if not conversation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation not found"
+        )
+
+    # Add AI message to database
+    message_id = str(uuid.uuid4())
+    cursor.execute(
+        "INSERT INTO messages (id, conversation_id, is_user, content) VALUES (%s, %s, %s, %s)",
         (message_id, conversation_id, False, message)
     )
-    
-    db.commit() # Commit user message
+    db.commit()  # Commit AI message
 
-    
-    return jsonify({ "success" : True, "message" : "Ai message inserted in db successfully"}),200
+    return SaveMessageResponse(
+        success=True,
+        message="AI message inserted in db successfully"
+    )
 
+    @app.delete('/api/conversations/{conversation_id}', response_model=Dict[str, str])
+    async def delete_conversation(
+        conversation_id: str,
+        request: Request,
+        user_id: str = Depends(login_required),
+        db: psycopg2.extensions.connection = Depends(get_db_connection)
+    ):
+        """Delete a conversation and its messages for the authenticated user"""
+        cursor = db.cursor()
 
+        # Verify conversation belongs to user
+        cursor.execute(
+            "SELECT id FROM conversations WHERE id = %s AND user_id = %s",
+            (conversation_id, user_id)
+        )
+        conversation = cursor.fetchone()
 
-# Document upload route
-@app.route('/api/upload', methods=['POST'])
-@login_required
-def upload():
-    """Upload a new DOCX/TXT file; triggers incremental indexing."""
-    if 'file' not in request.files:
-        return jsonify({"error": "No file part"}), 400
-        
-    file = request.files['file']
-    
-    if file.filename == '':
-        return jsonify({"error": "Empty filename"}), 400
-    
-    filename = secure_filename(file.filename)
-    filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-    file.save(filepath)
-    
-    # Update store incrementally
-    # Assuming build_or_update_store and VectorStore.load still work as expected
-    # and do not directly interact with the database (only local files).
-    build_or_update_store({filename}, "vector_store/index.faiss")
-    
-    return jsonify({"status": "indexed", "file": filename}), 200
+        if not conversation:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Conversation not found"
+            )
 
-
-
-if __name__ == '__main__':
-    # It's good practice to initialize the DB once when the app starts
-    # if you're sure it hasn't been initialized before, 
-    # or let the /api/initialize endpoint handle it.
-    # For a simple dev setup, you might call initialize_database() directly here.
-    # However, for a Flask app, it's often better to let the teardown context 
-    # manage the connection lifecycle.
-    # To ensure the DB file is created if not exists, `get_db()` will create it.
-    # Then, the `initialize_database()` function needs to be called to create tables.
-    
-    # You could call initialize_database() here for first-time setup
-    # with proper error handling or let the /api/initialize endpoint be the trigger.
-    # For demonstration purposes, calling it on startup might be desired
-    # if you don't want to manually hit the /api/initialize endpoint.
-    try:
-        with app.app_context():
-            initialize_database()
-            print("Database tables initialized if not existing.")
-    except Exception as e:
-        print(f"Error initializing database on startup: {e}")
-
-
-    app.run(debug=True)
+        try:
+            # Delete messages first (if ON DELETE CASCADE is not set)
+            cursor.execute(
+                "DELETE FROM messages WHERE conversation_id = %s",
+                (conversation_id,)
+            )
+            # Delete the conversation
+            cursor.execute(
+                "DELETE FROM conversations WHERE id = %s",
+                (conversation_id,)
+            )
+            db.commit()
+            return {"message": "Conversation deleted successfully"}
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=str(e)
+            )

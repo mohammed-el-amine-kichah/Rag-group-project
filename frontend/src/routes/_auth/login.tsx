@@ -4,6 +4,7 @@ import { Building2, Mail, Lock, Loader2 } from "lucide-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { kyInstance } from "@/constants";
 import { toast } from "sonner";
+import type { HTTPError } from "ky";
 
 export const Route = createFileRoute("/_auth/login")({
   component: RouteComponent,
@@ -29,10 +30,11 @@ export function RouteComponent() {
       await queryClient.refetchQueries({ queryKey: ["auth-user"] });
       navigate({ to: "/" });
     },
-    onError: (err) => {
-      console.error("Login error:", err);
+    onError: async (err: HTTPError) => {
+      const errors: { detail: string } = await err.response.json();
+
       toast.error("فشل تسجيل الدخول");
-      setErrors((lastError) => ({ ...lastError, general: err.message }));
+      setErrors((lastError) => ({ ...lastError, general: errors.detail }));
     },
   });
 
