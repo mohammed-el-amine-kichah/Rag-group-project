@@ -13,10 +13,12 @@ import {
   LogOut,
   MessageCirclePlus,
   Loader2,
+  Trash2,
 } from "lucide-react";
 import {
   queryOptions,
   useMutation,
+  useQuery,
   useQueryClient,
   useSuspenseQuery,
 } from "@tanstack/react-query";
@@ -68,7 +70,7 @@ function RouteComponent() {
 
   const { data: user } = useSuspenseQuery(authQueryOptions);
 
-  const { data: previousConversations } = useSuspenseQuery({
+  const { data: previousConversations } = useQuery({
     queryKey: ["previous-conversations"],
     queryFn: () =>
       kyInstance.get("conversations").json<{
@@ -91,42 +93,6 @@ function RouteComponent() {
       console.log(err);
     },
   });
-
-  // const { mutate , isPending : isSendingMessage } = useMutation({
-  //   mutationFn: (message: string) =>
-  //     kyInstance
-  //       .post(`conversations/${id}/messages`, {
-  //         json: {
-  //           message,
-  //         },
-  //       })
-  //       .json<{ id: string; is_user: false; content: string }>(),
-
-  //   onSuccess: (data) => {
-  //     queryClient.setQueryData<Chat>(["chat", id], (chat) => {
-  //       if (!chat) return chat;
-  //       return { ...chat, messages: [data, ...chat.messages] };
-  //     });
-  //     queryClient.refetchQueries({queryKey : ["previous-conversations"]});
-  //   },
-
-  //   onError: () => {
-  //     queryClient.setQueryData<Chat>(["chat", id], (chat) => {
-  //       if (!chat) return chat;
-  //       return {
-  //         ...chat,
-  //         messages: [
-  //           {
-  //             id: crypto.randomUUID() as string,
-  //             content: "عذراً، حدث خطأ في النظام. يرجى المحاولة مرة أخرى.",
-  //             is_user: false,
-  //           },
-  //           ...chat.messages,
-  //         ],
-  //       };
-  //     });
-  //   },
-  // });
 
   const { mutate: sendMessageStream, isPending: isSendingMessageStream } =
     useMutation({
@@ -195,6 +161,15 @@ function RouteComponent() {
         return true;
       },
     });
+
+  const {} = useMutation({
+    mutationFn: (id: string) => {
+      return kyInstance(`conversation/${id}`).json();
+    },
+    onSuccess: () => {
+      toast.success("Conversation");
+    },
+  });
 
   const { mutate: createNewConversation, isPending: isCreatingNewPage } =
     useMutation({
@@ -323,9 +298,9 @@ function RouteComponent() {
               <span>المحادثات السابقة</span>
             </h4>
             <div className="overflow-y-auto space-y-2 w-full">
-              {previousConversations.conversations.map((conv) => (
+              {previousConversations?.conversations.map((conv) => (
                 <Link
-                  className="hover:bg-emerald-800 block rounded-lg p-3 transition-colors w-full"
+                  className="hover:bg-emerald-800 rounded-lg p-3 transition-colors flex items-center justify-between w-full"
                   key={conv.id}
                   to="/chat/$id"
                   params={{ id: conv.id }}
@@ -333,7 +308,10 @@ function RouteComponent() {
                     className: "bg-emerald-800",
                   }}
                 >
-                  {conv.title}
+                  <span>{conv.title}</span>
+                  <button className="hover:bg-gray-100/70 rounded-xl p-1 ">
+                    <Trash2 />
+                  </button>
                 </Link>
               ))}
             </div>

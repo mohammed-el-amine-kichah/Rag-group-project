@@ -82,6 +82,11 @@ def get_db_connection() -> Generator[psycopg2.extensions.connection, None, None]
             db.close()
 
 
+
+@app.get('/health')
+async def get_health() :
+    return {"message" : "good"}
+
 # Pydantic models for request validation
 class SignupRequest(BaseModel):
     name: str
