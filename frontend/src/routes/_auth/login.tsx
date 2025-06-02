@@ -30,6 +30,7 @@ export function RouteComponent() {
       navigate({ to: "/" });
     },
     onError: (err) => {
+      console.error("Login error:", err);
       toast.error("فشل تسجيل الدخول");
       setErrors((lastError) => ({ ...lastError, general: err.message }));
     },
@@ -61,8 +62,6 @@ export function RouteComponent() {
 
     mutate();
   };
-
-  console.log({isPending})
 
   return (
     <div
@@ -141,7 +140,11 @@ export function RouteComponent() {
             type="submit"
             className="w-full flex items-center justify-center bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg px-4 py-2 transition-colors"
           >
-            {!isPending ? "تسجيل الدخول" : <Loader2 className="size-5 animate-spin shrink-0" />}
+            {!isPending ? (
+              "تسجيل الدخول"
+            ) : (
+              <Loader2 className="size-5 animate-spin shrink-0" />
+            )}
           </button>
         </form>
 

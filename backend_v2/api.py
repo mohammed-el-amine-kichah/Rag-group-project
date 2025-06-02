@@ -55,7 +55,7 @@ app.add_middleware(SessionMiddleware, secret_key="your-secret-key-here")
 # Add CORS middleware (equivalent to Flask-CORS)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure as needed
+    allow_origins=["http://localhost:5173"],  # Configure as needed
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -128,7 +128,7 @@ async def get_current_user(request: Request, user_id: str = Depends(login_requir
     cursor = db.cursor()
     
     cursor.execute(
-        "SELECT id, name, email FROM users WHERE id = ?", (user_id,)
+        "SELECT id, name, email FROM users WHERE id = %s", (user_id,)
     )
     user = cursor.fetchone()
     
@@ -159,7 +159,7 @@ async def signup(request: Request, signup_data: SignupRequest,db: psycopg2.exten
     
     # Check if user already exists
     cursor.execute(
-        "SELECT id FROM users WHERE email = ?", (signup_data.email,)
+        "SELECT id FROM users WHERE email = %s", (signup_data.email,)
     )
     existing_user = cursor.fetchone()
     
@@ -175,7 +175,7 @@ async def signup(request: Request, signup_data: SignupRequest,db: psycopg2.exten
     
     try:
         cursor.execute(
-            "INSERT INTO users (id, name, email, password) VALUES (?, ?, ?, ?)",
+            "INSERT INTO users (id, name, email, password) VALUES (%s, %s, %s, %s)",
             (user_id, signup_data.name, signup_data.email, hashed_password)
         )
         db.commit()
@@ -199,13 +199,13 @@ async def signup(request: Request, signup_data: SignupRequest,db: psycopg2.exten
 
 @app.post('/api/login', response_model=Dict[str, Any])
 async def login(request: Request, login_data: LoginRequest,db: psycopg2.extensions.connection = Depends(get_db_connection)):
-    """User login endpoint"""
+
 
     cursor = db.cursor()
 
     # Find user
     cursor.execute(
-        "SELECT id, name, email, password FROM users WHERE email = ?", (login_data.email,)
+        "SELECT id, name, email, password FROM users WHERE email = %s", (login_data.email,)
     )
     user = cursor.fetchone()
 
@@ -252,7 +252,7 @@ async def get_session(request: Request, db: psycopg2.extensions.connection = Dep
     cursor = db.cursor()
 
     cursor.execute(
-        "SELECT id, name, email FROM users WHERE id = ?", (request.session['user_id'],)
+        "SELECT id, name, email FROM users WHERE id = %s", (request.session['user_id'],)
     )
     user = cursor.fetchone()
     
@@ -301,7 +301,7 @@ async def get_conversations(
         """
         SELECT id, title, created_at, updated_at, is_new
         FROM conversations
-        WHERE user_id = ?
+        WHERE user_id = %s
         ORDER BY updated_at DESC
         """,
         (user_id,)
@@ -333,7 +333,7 @@ async def create_conversation(
 
     # Check if an existing 'new' conversation exists for this user
     cursor.execute(
-        "SELECT id, title FROM conversations WHERE user_id = ? AND is_new = TRUE LIMIT 1",
+        "SELECT id, title FROM conversations WHERE user_id = %s AND is_new = TRUE LIMIT 1",
         (user_id,)
     )
     existing_new_conversation = cursor.fetchone()
@@ -353,7 +353,7 @@ async def create_conversation(
 
     try:
         cursor.execute(
-            "INSERT INTO conversations (id, user_id, title, is_new) VALUES (?, ?, ?, TRUE)",
+            "INSERT INTO conversations (id, user_id, title, is_new) VALUES (%s, %s, %s, TRUE)",
             (conversation_id, user_id, title_to_use)
         )
         db.commit()  # Commit the new conversation
@@ -400,7 +400,7 @@ async def get_conversations(
         """
         SELECT id, title, created_at, updated_at, is_new
         FROM conversations
-        WHERE user_id = ?
+        WHERE user_id = %s
         ORDER BY updated_at DESC
         """,
         (user_id,)
@@ -432,7 +432,7 @@ async def create_conversation(
 
     # Check if an existing 'new' conversation exists for this user
     cursor.execute(
-        "SELECT id, title FROM conversations WHERE user_id = ? AND is_new = TRUE LIMIT 1",
+        "SELECT id, title FROM conversations WHERE user_id = %s AND is_new = TRUE LIMIT 1",
         (user_id,)
     )
     existing_new_conversation = cursor.fetchone()
@@ -452,7 +452,7 @@ async def create_conversation(
 
     try:
         cursor.execute(
-            "INSERT INTO conversations (id, user_id, title, is_new) VALUES (?, ?, ?, TRUE)",
+            "INSERT INTO conversations (id, user_id, title, is_new) VALUES (%s, %s, %s, TRUE)",
             (conversation_id, user_id, title_to_use)
         )
         db.commit()  # Commit the new conversation
@@ -495,7 +495,7 @@ async def get_conversation(
 
     # Verify conversation belongs to user
     cursor.execute(
-        "SELECT id, title FROM conversations WHERE id = ? AND user_id = ?",
+        "SELECT id, title FROM conversations WHERE id = %s AND user_id = %s",
         (conversation_id, user_id)
     )
     conversation = cursor.fetchone()
@@ -511,7 +511,7 @@ async def get_conversation(
         """
         SELECT id, is_user, content, created_at
         FROM messages
-        WHERE conversation_id = ?
+        WHERE conversation_id = %s
         ORDER BY created_at DESC
         """,
         (conversation_id,)
@@ -568,7 +568,7 @@ async def stream_answer(
 
     # Validate conversation ownership
     cursor.execute(
-        "SELECT id, is_new, is_title_changed FROM conversations WHERE id = ? AND user_id = ?", 
+        "SELECT id, is_new, is_title_changed FROM conversations WHERE id = %s AND user_id = %s", 
         (conversation_id, user_id)
     )
     conversation = cursor.fetchone()
@@ -583,7 +583,7 @@ async def stream_answer(
     if bool(conversation['is_new']) == True:
         # If the conversation is new, set is_new to False
         cursor.execute(
-            "UPDATE conversations SET is_new = FALSE WHERE id = ?",
+            "UPDATE conversations SET is_new = FALSE WHERE id = %s",
             (conversation_id,)
         )
         db.commit()  # Commit the update
@@ -595,7 +595,7 @@ async def stream_answer(
         if new_title:
             # If the title has not been changed, update it to the first message
             cursor.execute(
-                "UPDATE conversations SET title = ?, is_title_changed = TRUE WHERE id = ?",
+                "UPDATE conversations SET title = %s, is_title_changed = TRUE WHERE id = %s",
                 (new_title, conversation_id)
             )
             db.commit()
@@ -603,7 +603,7 @@ async def stream_answer(
     # Add user message to database
     message_id = str(uuid.uuid4())
     cursor.execute(
-        "INSERT INTO messages (id, conversation_id, is_user, content) VALUES (?, ?, ?, ?)",
+        "INSERT INTO messages (id, conversation_id, is_user, content) VALUES (%s, %s, %s, %s)",
         (message_id, conversation_id, True, message)
     )
     db.commit()  # Commit user message
@@ -611,9 +611,9 @@ async def stream_answer(
     # Build conversation history
     cursor.execute("""
         SELECT is_user, content FROM messages
-        WHERE conversation_id = ?
+        WHERE conversation_id = %s
         ORDER BY created_at ASC
-        LIMIT ?
+        LIMIT %s
     """, (conversation_id, MEMORY_SIZE * 2))  # You'll need to define MEMORY_SIZE
     
     history = cursor.fetchall()
@@ -668,7 +668,7 @@ async def save_ai_answer(
 
     # Validate conversation ownership
     cursor.execute(
-        "SELECT id FROM conversations WHERE id = ? AND user_id = ?", 
+        "SELECT id FROM conversations WHERE id = %s AND user_id = %s", 
         (conversation_id, user_id)
     )
     conversation = cursor.fetchone()
@@ -682,7 +682,7 @@ async def save_ai_answer(
     # Add AI message to database
     message_id = str(uuid.uuid4())
     cursor.execute(
-        "INSERT INTO messages (id, conversation_id, is_user, content) VALUES (?, ?, ?, ?)",
+        "INSERT INTO messages (id, conversation_id, is_user, content) VALUES (%s, %s, %s, %s)",
         (message_id, conversation_id, False, message)
     )
     db.commit()  # Commit AI message
